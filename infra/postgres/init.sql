@@ -1,0 +1,4 @@
+-- P0 placeholder.
+-- pgvector is available in the selected Docker image.
+-- Enable only once migrations are ready:
+-- CREATE EXTENSION IF NOT EXISTS vector;

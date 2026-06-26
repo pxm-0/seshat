@@ -1,0 +1,20 @@
+{
+  email you@example.com
+}
+
+:80 {
+  handle /api/* {
+    reverse_proxy api:3001
+  }
+
+  reverse_proxy web:3000
+}
+
+# Production example:
+# seshat.example.com {
+#   handle /api/* {
+#     reverse_proxy api:3001
+#   }
+#
+#   reverse_proxy web:3000
+# }
