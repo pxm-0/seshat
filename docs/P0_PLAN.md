@@ -53,20 +53,20 @@ P0 does not include:
 
 ## P0 Deliverables
 
-| Deliverable | File |
-|---|---|
-| Product scope | `docs/PRODUCT_REQUIREMENTS.md` |
-| Architecture | `docs/ARCHITECTURE.md` |
-| Data model | `docs/DATA_MODEL.md` |
-| API design | `docs/API_DESIGN.md` |
-| AI policy | `docs/AI_MODEL_POLICY.md` |
-| Security | `docs/SECURITY.md` |
-| Cost controls | `docs/COST_ENGINEERING.md` |
-| Deployment | `docs/DEPLOYMENT.md` |
-| Backup/restore | `docs/BACKUP_RESTORE.md` |
-| Observability | `docs/OBSERVABILITY.md` |
-| Roadmap | `docs/ROADMAP.md` |
-| Decisions | `docs/decisions/*.md` |
+| Deliverable    | File                           |
+| -------------- | ------------------------------ |
+| Product scope  | `docs/PRODUCT_REQUIREMENTS.md` |
+| Architecture   | `docs/ARCHITECTURE.md`         |
+| Data model     | `docs/DATA_MODEL.md`           |
+| API design     | `docs/API_DESIGN.md`           |
+| AI policy      | `docs/AI_MODEL_POLICY.md`      |
+| Security       | `docs/SECURITY.md`             |
+| Cost controls  | `docs/COST_ENGINEERING.md`     |
+| Deployment     | `docs/DEPLOYMENT.md`           |
+| Backup/restore | `docs/BACKUP_RESTORE.md`       |
+| Observability  | `docs/OBSERVABILITY.md`        |
+| Roadmap        | `docs/ROADMAP.md`              |
+| Decisions      | `docs/decisions/*.md`          |
 
 ## P0 Exit Criteria
 

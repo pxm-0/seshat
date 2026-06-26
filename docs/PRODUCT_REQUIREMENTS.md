@@ -124,27 +124,27 @@ As an operator, I want budget caps so the app cannot burn money accidentally.
 
 ## Non-Functional Requirements
 
-| Area | Requirement |
-|---|---|
-| Editor UX | Typing must feel local and immediate. |
-| Reliability | No lost writing. |
-| AI failure | Writing must continue if AI providers fail. |
-| Security | Manuscripts private by default. |
-| Cost | AI spend visible and controllable. |
-| Maintainability | Modular monolith with clear module boundaries. |
-| Deployment | Self-hostable with Docker Compose. |
-| Observability | Errors, AI usage, job failures, and backups must be visible. |
+| Area            | Requirement                                                  |
+| --------------- | ------------------------------------------------------------ |
+| Editor UX       | Typing must feel local and immediate.                        |
+| Reliability     | No lost writing.                                             |
+| AI failure      | Writing must continue if AI providers fail.                  |
+| Security        | Manuscripts private by default.                              |
+| Cost            | AI spend visible and controllable.                           |
+| Maintainability | Modular monolith with clear module boundaries.               |
+| Deployment      | Self-hostable with Docker Compose.                           |
+| Observability   | Errors, AI usage, job failures, and backups must be visible. |
 
 ## Success Criteria
 
-| Area | Success Criteria |
-|---|---|
-| Writing workflow | User can create projects, organize documents, write, and manage notes. |
-| AI assistance | AI can rewrite, continue, summarize, and critique using relevant context. |
-| Safety | User work is autosaved and protected by snapshots. |
-| Cost | AI usage is routed through policy and logged. |
-| Reliability | AI failure does not block editing. |
-| Maintainability | New AI providers/models can be added without rewriting features. |
+| Area             | Success Criteria                                                          |
+| ---------------- | ------------------------------------------------------------------------- |
+| Writing workflow | User can create projects, organize documents, write, and manage notes.    |
+| AI assistance    | AI can rewrite, continue, summarize, and critique using relevant context. |
+| Safety           | User work is autosaved and protected by snapshots.                        |
+| Cost             | AI usage is routed through policy and logged.                             |
+| Reliability      | AI failure does not block editing.                                        |
+| Maintainability  | New AI providers/models can be added without rewriting features.          |
 
 ## Explicit Non-MVP
 

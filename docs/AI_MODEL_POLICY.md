@@ -66,12 +66,12 @@ style_profile
 
 Model names should be configured in environment or database. Do not hardcode them in feature code.
 
-| Task | Context | Output | Cost Sensitivity | Notes |
-|---|---:|---:|---|---|
-| Rewrite selected text | selection + local paragraph/chapter context | short/medium | medium | Must preserve user intent unless instructed otherwise. |
-| Continue document | active document excerpt + synopsis | medium | medium/high | Should be staged. |
-| Summarize document | full document if small, chunks if large | short/medium | low/medium | Used later for retrieval. |
-| Critique text | selection/document excerpt | medium | medium | Should be analytical, not destructive. |
+| Task                  |                                     Context |       Output | Cost Sensitivity | Notes                                                  |
+| --------------------- | ------------------------------------------: | -----------: | ---------------- | ------------------------------------------------------ |
+| Rewrite selected text | selection + local paragraph/chapter context | short/medium | medium           | Must preserve user intent unless instructed otherwise. |
+| Continue document     |          active document excerpt + synopsis |       medium | medium/high      | Should be staged.                                      |
+| Summarize document    |     full document if small, chunks if large | short/medium | low/medium       | Used later for retrieval.                              |
+| Critique text         |                  selection/document excerpt |       medium | medium           | Should be analytical, not destructive.                 |
 
 ## Context Rules
 

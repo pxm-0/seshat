@@ -45,7 +45,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    command: ["pnpm", "worker"]
+    command: ["pnpm", "--filter", "@seshat/worker", "worker"]
     depends_on:
       - postgres
       - redis

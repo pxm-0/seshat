@@ -94,13 +94,13 @@ verify snapshots
 
 ## Failure Scenarios
 
-| Failure | Recovery |
-|---|---|
-| Accidental document overwrite | Restore document snapshot. |
-| Bad AI edit | Restore pre-AI snapshot. |
-| Database corruption | Restore Postgres backup. |
-| Server disk failure | Rebuild server, restore database/config/files. |
-| Secret leak | Rotate provider/session secrets. |
+| Failure                       | Recovery                                       |
+| ----------------------------- | ---------------------------------------------- |
+| Accidental document overwrite | Restore document snapshot.                     |
+| Bad AI edit                   | Restore pre-AI snapshot.                       |
+| Database corruption           | Restore Postgres backup.                       |
+| Server disk failure           | Rebuild server, restore database/config/files. |
+| Secret leak                   | Rotate provider/session secrets.               |
 
 ## Non-Negotiable
 
