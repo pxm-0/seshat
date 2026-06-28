@@ -5,7 +5,7 @@ import {
   type AiTaskType,
   buildAiGatewayRequest,
   loadAiRuntimeConfig,
-  runOpenRouterChat,
+  runAiGateway,
 } from "@seshat/ai";
 import { aiRuns, aiUsageEvents, createDatabase, documents, projects } from "@seshat/db";
 import { Worker } from "bullmq";
@@ -66,7 +66,7 @@ const worker = new Worker<AiRunJob>(
         },
         policy,
       );
-      const result = await runOpenRouterChat(aiConfig, request);
+      const result = await runAiGateway(aiConfig, request);
       await db
         .update(aiRuns)
         .set({

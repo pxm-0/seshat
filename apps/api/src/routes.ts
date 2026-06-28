@@ -3,11 +3,12 @@ import {
   AiConfigError,
   AiProviderError,
   type AiTaskType,
+  assertAiProviderConfigured,
   buildAiGatewayRequest,
   estimateCostUsd,
   estimateTokens,
   loadAiRuntimeConfig,
-  runOpenRouterChat,
+  runAiGateway,
 } from "@seshat/ai";
 import {
   aiRuns,
@@ -437,7 +438,7 @@ async function runAiTaskToCompletion({
       },
       policy,
     );
-    const result = await runOpenRouterChat(aiConfig, request);
+    const result = await runAiGateway(aiConfig, request);
     const [updatedRun] = await db
       .update(aiRuns)
       .set({
@@ -880,6 +881,11 @@ export function registerRoutes(server: FastifyInstance, db: Database, config: Ap
       throw providerErrorToApiError(error);
     }
     const policy = aiConfig.policies[body.taskType];
+    try {
+      assertAiProviderConfigured(aiConfig, policy.provider);
+    } catch (error) {
+      throw providerErrorToApiError(error);
+    }
     const estimatedInputTokens = estimateTokens(
       [
         project.title,
@@ -909,6 +915,7 @@ export function registerRoutes(server: FastifyInstance, db: Database, config: Ap
         documentId: document.id,
         taskType: body.taskType,
         status: asyncAiTask(body.taskType) ? "queued" : "running",
+        provider: policy.provider,
         model: policy.defaultModel,
         inputExcerpt: body.selection?.text ?? document.plainText.slice(0, 4000),
       })
