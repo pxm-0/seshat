@@ -5,6 +5,7 @@ const configSchema = z.object({
   databaseUrl: z.string().min(1),
   nodeEnv: z.string(),
   port: z.number().int().positive(),
+  redisUrl: z.string().min(1),
   sessionSecret: z.string().min(8),
 });
 
@@ -16,6 +17,7 @@ export function loadConfig(): ApiConfig {
     databaseUrl: process.env.DATABASE_URL,
     nodeEnv: process.env.NODE_ENV ?? "development",
     port: Number(process.env.PORT ?? 3001),
+    redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
     sessionSecret: process.env.SESSION_SECRET ?? "change-me-dev-secret",
   });
 }

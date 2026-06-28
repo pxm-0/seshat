@@ -1,6 +1,26 @@
-import { documentSnapshots, documents, projects, users, type Database } from "@seshat/db";
+import {
+  AI_QUEUE_NAME,
+  AiConfigError,
+  AiProviderError,
+  type AiTaskType,
+  buildAiGatewayRequest,
+  estimateCostUsd,
+  estimateTokens,
+  loadAiRuntimeConfig,
+  runOpenRouterChat,
+} from "@seshat/ai";
+import {
+  aiRuns,
+  aiUsageEvents,
+  documentSnapshots,
+  documents,
+  projects,
+  users,
+  type Database,
+} from "@seshat/db";
 import argon2 from "argon2";
-import { and, count, desc, eq, inArray, isNull } from "drizzle-orm";
+import { Queue } from "bullmq";
+import { and, count, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
@@ -21,6 +41,10 @@ const snapshotParamSchema = z.object({
   projectId: z.string().uuid(),
   documentId: z.string().uuid(),
   snapshotId: z.string().uuid(),
+});
+
+const aiRunParamSchema = z.object({
+  aiRunId: z.string().uuid(),
 });
 
 const setupRequestSchema = z.object({
@@ -93,6 +117,29 @@ const createSnapshotRequestSchema = z.object({
   title: z.string().trim().max(180).nullable().optional(),
 });
 
+const aiTaskTypeSchema = z.enum([
+  "rewrite_selected_text",
+  "continue_document",
+  "summarize_document",
+  "critique_text",
+]);
+
+const createAiRunRequestSchema = z.object({
+  projectId: z.string().uuid(),
+  documentId: z.string().uuid(),
+  taskType: aiTaskTypeSchema,
+  selection: z
+    .object({
+      text: z.string(),
+      from: z.number().int().nonnegative(),
+      to: z.number().int().nonnegative(),
+    })
+    .nullable()
+    .optional(),
+  instructions: z.string().trim().max(2000).optional(),
+  confirmed: z.boolean().optional(),
+});
+
 const emptyEditorJson = {
   type: "doc",
   content: [{ type: "paragraph" }],
@@ -146,6 +193,40 @@ function serializeSnapshot(snapshot: typeof documentSnapshots.$inferSelect) {
     plainText: snapshot.plainText,
     wordCount: snapshot.wordCount,
     createdAt: serializeDate(snapshot.createdAt),
+  };
+}
+
+function serializeAiRun(run: typeof aiRuns.$inferSelect) {
+  return {
+    id: run.id,
+    projectId: run.projectId,
+    documentId: run.documentId,
+    taskType: run.taskType,
+    status: run.status,
+    suggestionStatus: run.suggestionStatus,
+    provider: run.provider,
+    model: run.model,
+    suggestionText: run.outputExcerpt,
+    errorMessage: run.errorMessage,
+    createdAt: serializeDate(run.createdAt),
+    startedAt: run.startedAt ? serializeDate(run.startedAt) : null,
+    completedAt: run.completedAt ? serializeDate(run.completedAt) : null,
+    acceptedAt: run.acceptedAt ? serializeDate(run.acceptedAt) : null,
+    rejectedAt: run.rejectedAt ? serializeDate(run.rejectedAt) : null,
+  };
+}
+
+function serializeUsageEvent(event: typeof aiUsageEvents.$inferSelect | undefined) {
+  if (!event) {
+    return null;
+  }
+
+  return {
+    inputTokens: event.inputTokens,
+    outputTokens: event.outputTokens,
+    totalTokens: event.totalTokens,
+    estimatedCostUsd: event.estimatedCostUsd,
+    actualCostUsd: event.actualCostUsd,
   };
 }
 
@@ -237,8 +318,178 @@ async function nextSortOrder(db: Database, projectId: string, parentId: string |
   return (lastSibling?.sortOrder ?? 0) + 1000;
 }
 
+function asyncAiTask(taskType: AiTaskType) {
+  return taskType === "summarize_document" || taskType === "critique_text";
+}
+
+function providerErrorToApiError(error: unknown): ApiError {
+  if (error instanceof AiConfigError) {
+    return new ApiError(503, "AI_CONFIG_MISSING", error.message);
+  }
+
+  if (error instanceof AiProviderError) {
+    return new ApiError(502, "AI_PROVIDER_FAILED", error.message);
+  }
+
+  if (error instanceof Error) {
+    return new ApiError(500, "AI_RUN_FAILED", error.message);
+  }
+
+  return new ApiError(500, "AI_RUN_FAILED", "AI task failed.");
+}
+
+async function getUsageTotal(db: Database, projectId: string, since: Date) {
+  const [row] = await db
+    .select({
+      total: sql<string>`coalesce(sum(coalesce(${aiUsageEvents.actualCostUsd}, ${aiUsageEvents.estimatedCostUsd})), 0)`,
+    })
+    .from(aiUsageEvents)
+    .where(and(eq(aiUsageEvents.projectId, projectId), gte(aiUsageEvents.createdAt, since)));
+
+  return Number(row?.total ?? 0);
+}
+
+function startOfDay() {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function startOfMonth() {
+  const date = new Date();
+  date.setDate(1);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+async function enforceAiBudget({
+  confirmed,
+  db,
+  estimatedCostUsd,
+  policy,
+  projectId,
+}: {
+  confirmed: boolean;
+  db: Database;
+  estimatedCostUsd: string;
+  policy: ReturnType<typeof loadAiRuntimeConfig>["policies"][AiTaskType];
+  projectId: string;
+}) {
+  const dailyTotal = await getUsageTotal(db, projectId, startOfDay());
+  const monthlyTotal = await getUsageTotal(db, projectId, startOfMonth());
+  const estimate = Number(estimatedCostUsd);
+  const dailyBudget = Number(policy.dailyBudgetUsd);
+  const monthlyBudget = Number(policy.monthlyBudgetUsd);
+
+  if (dailyTotal + estimate > dailyBudget) {
+    throw new ApiError(402, "AI_DAILY_BUDGET_EXCEEDED", "Daily AI budget exceeded.");
+  }
+
+  if (monthlyTotal + estimate > monthlyBudget) {
+    throw new ApiError(402, "AI_MONTHLY_BUDGET_EXCEEDED", "Monthly AI budget exceeded.");
+  }
+
+  if (!confirmed && estimate > Number(policy.requiresConfirmationAboveEstimatedCostUsd)) {
+    return {
+      confirmationRequired: true,
+      estimatedCostUsd,
+      message: "This request may exceed your confirmation threshold.",
+    };
+  }
+
+  return null;
+}
+
+async function runAiTaskToCompletion({
+  db,
+  document,
+  instructions,
+  project,
+  runId,
+  selectionText,
+  taskType,
+}: {
+  db: Database;
+  document: typeof documents.$inferSelect;
+  instructions?: string;
+  project: typeof projects.$inferSelect;
+  runId: string;
+  selectionText?: string;
+  taskType: AiTaskType;
+}) {
+  await db
+    .update(aiRuns)
+    .set({ status: "running", startedAt: new Date() })
+    .where(eq(aiRuns.id, runId));
+
+  try {
+    const aiConfig = loadAiRuntimeConfig();
+    const policy = aiConfig.policies[taskType];
+    const request = buildAiGatewayRequest(
+      {
+        taskType,
+        projectTitle: project.title,
+        documentTitle: document.title,
+        documentPlainText: document.plainText,
+        documentSynopsis: document.synopsis,
+        selectionText,
+        instructions,
+      },
+      policy,
+    );
+    const result = await runOpenRouterChat(aiConfig, request);
+    const [updatedRun] = await db
+      .update(aiRuns)
+      .set({
+        status: "succeeded",
+        model: result.model,
+        outputExcerpt: result.text,
+        completedAt: new Date(),
+      })
+      .where(eq(aiRuns.id, runId))
+      .returning();
+
+    const [usage] = await db
+      .insert(aiUsageEvents)
+      .values({
+        aiRunId: runId,
+        userId: updatedRun?.userId ?? "",
+        projectId: project.id,
+        documentId: document.id,
+        provider: result.provider,
+        model: result.model,
+        taskType,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        totalTokens: result.totalTokens,
+        estimatedCostUsd: result.estimatedCostUsd,
+        actualCostUsd: result.actualCostUsd,
+      })
+      .returning();
+
+    return {
+      aiRun: serializeAiRun(
+        requireRow(updatedRun, "AI_RUN_UPDATE_FAILED", "Could not update AI run."),
+      ),
+      usage: serializeUsageEvent(usage),
+    };
+  } catch (error) {
+    const apiError = providerErrorToApiError(error);
+    await db
+      .update(aiRuns)
+      .set({
+        status: "failed",
+        errorMessage: apiError.message,
+        completedAt: new Date(),
+      })
+      .where(eq(aiRuns.id, runId));
+    throw apiError;
+  }
+}
+
 export function registerRoutes(server: FastifyInstance, db: Database, config: ApiConfig) {
   const secureCookie = config.nodeEnv === "production";
+  const aiQueue = new Queue(AI_QUEUE_NAME, { connection: { url: config.redisUrl } });
 
   server.get("/api/auth/setup-status", async () => {
     const [row] = await db.select({ value: count() }).from(users);
@@ -608,4 +859,219 @@ export function registerRoutes(server: FastifyInstance, db: Database, config: Ap
       };
     },
   );
+
+  server.post("/api/ai/runs", async (request) => {
+    const user = await requireUser(db, request);
+    const body = createAiRunRequestSchema.parse(request.body);
+    const project = await ensureProjectAccess(db, body.projectId, user.id);
+    const document = await ensureDocumentAccess(db, body.projectId, body.documentId);
+    if (document.type === "folder") {
+      throw new ApiError(400, "AI_DOCUMENT_UNSUPPORTED", "AI cannot run on folders.");
+    }
+
+    if (body.taskType === "rewrite_selected_text" && !body.selection?.text.trim()) {
+      throw new ApiError(400, "AI_SELECTION_REQUIRED", "Rewrite requires selected text.");
+    }
+
+    let aiConfig;
+    try {
+      aiConfig = loadAiRuntimeConfig();
+    } catch (error) {
+      throw providerErrorToApiError(error);
+    }
+    const policy = aiConfig.policies[body.taskType];
+    const estimatedInputTokens = estimateTokens(
+      [
+        project.title,
+        document.title,
+        document.synopsis ?? "",
+        body.selection?.text ?? document.plainText,
+        body.instructions ?? "",
+      ].join("\n"),
+    );
+    const estimatedCostUsd = estimateCostUsd(estimatedInputTokens, policy.maxOutputTokens);
+    const confirmation = await enforceAiBudget({
+      confirmed: body.confirmed ?? false,
+      db,
+      estimatedCostUsd,
+      policy,
+      projectId: project.id,
+    });
+    if (confirmation) {
+      return confirmation;
+    }
+
+    const [run] = await db
+      .insert(aiRuns)
+      .values({
+        userId: user.id,
+        projectId: project.id,
+        documentId: document.id,
+        taskType: body.taskType,
+        status: asyncAiTask(body.taskType) ? "queued" : "running",
+        model: policy.defaultModel,
+        inputExcerpt: body.selection?.text ?? document.plainText.slice(0, 4000),
+      })
+      .returning();
+    const createdRun = requireRow(run, "AI_RUN_CREATE_FAILED", "Could not create AI run.");
+
+    if (asyncAiTask(body.taskType)) {
+      await aiQueue.add("ai-run", {
+        aiRunId: createdRun.id,
+        instructions: body.instructions,
+        selectionText: body.selection?.text,
+      });
+      return { aiRunId: createdRun.id, status: "queued" };
+    }
+
+    return runAiTaskToCompletion({
+      db,
+      document,
+      instructions: body.instructions,
+      project,
+      runId: createdRun.id,
+      selectionText: body.selection?.text,
+      taskType: body.taskType,
+    });
+  });
+
+  server.get("/api/ai/runs/:aiRunId", async (request) => {
+    const user = await requireUser(db, request);
+    const params = aiRunParamSchema.parse(request.params);
+    const [run] = await db
+      .select()
+      .from(aiRuns)
+      .where(and(eq(aiRuns.id, params.aiRunId), eq(aiRuns.userId, user.id)))
+      .limit(1);
+    if (!run) {
+      throw new ApiError(404, "AI_RUN_NOT_FOUND", "AI run not found.");
+    }
+
+    await ensureProjectAccess(db, run.projectId, user.id);
+    const [usage] = await db
+      .select()
+      .from(aiUsageEvents)
+      .where(eq(aiUsageEvents.aiRunId, run.id))
+      .limit(1);
+    return { aiRun: serializeAiRun(run), usage: serializeUsageEvent(usage) };
+  });
+
+  server.post("/api/ai/runs/:aiRunId/accept", async (request) => {
+    const user = await requireUser(db, request);
+    const params = aiRunParamSchema.parse(request.params);
+    const [run] = await db
+      .select()
+      .from(aiRuns)
+      .where(and(eq(aiRuns.id, params.aiRunId), eq(aiRuns.userId, user.id)))
+      .limit(1);
+    if (!run) {
+      throw new ApiError(404, "AI_RUN_NOT_FOUND", "AI run not found.");
+    }
+    if (run.status !== "succeeded" || !run.outputExcerpt) {
+      throw new ApiError(400, "AI_RUN_NOT_READY", "AI run is not ready to accept.");
+    }
+    if (!run.documentId) {
+      throw new ApiError(400, "AI_DOCUMENT_MISSING", "AI run is not attached to a document.");
+    }
+
+    await ensureProjectAccess(db, run.projectId, user.id);
+    const document = await ensureDocumentAccess(db, run.projectId, run.documentId);
+    const [updatedRun] = await db.transaction(async (tx) => {
+      await tx.insert(documentSnapshots).values({
+        documentId: document.id,
+        projectId: document.projectId,
+        createdByUserId: user.id,
+        reason: "before_ai_apply",
+        title: "Before AI apply",
+        editorJson: document.editorJson,
+        plainText: document.plainText,
+        wordCount: document.wordCount,
+      });
+
+      return tx
+        .update(aiRuns)
+        .set({
+          suggestionStatus: "accepted",
+          acceptedAt: new Date(),
+        })
+        .where(eq(aiRuns.id, run.id))
+        .returning();
+    });
+
+    return {
+      aiRun: serializeAiRun(
+        requireRow(updatedRun, "AI_RUN_UPDATE_FAILED", "Could not accept AI run."),
+      ),
+    };
+  });
+
+  server.post("/api/ai/runs/:aiRunId/reject", async (request) => {
+    const user = await requireUser(db, request);
+    const params = aiRunParamSchema.parse(request.params);
+    const [run] = await db
+      .update(aiRuns)
+      .set({
+        suggestionStatus: "rejected",
+        rejectedAt: new Date(),
+      })
+      .where(and(eq(aiRuns.id, params.aiRunId), eq(aiRuns.userId, user.id)))
+      .returning();
+    if (!run) {
+      throw new ApiError(404, "AI_RUN_NOT_FOUND", "AI run not found.");
+    }
+
+    await ensureProjectAccess(db, run.projectId, user.id);
+    return { aiRun: serializeAiRun(run) };
+  });
+
+  server.get("/api/projects/:projectId/usage", async (request) => {
+    const user = await requireUser(db, request);
+    const params = uuidParamSchema.parse(request.params);
+    await ensureProjectAccess(db, params.projectId, user.id);
+    const [daily] = await db
+      .select({
+        total: sql<string>`coalesce(sum(coalesce(${aiUsageEvents.actualCostUsd}, ${aiUsageEvents.estimatedCostUsd})), 0)`,
+      })
+      .from(aiUsageEvents)
+      .where(
+        and(
+          eq(aiUsageEvents.projectId, params.projectId),
+          gte(aiUsageEvents.createdAt, startOfDay()),
+        ),
+      );
+    const [monthly] = await db
+      .select({
+        total: sql<string>`coalesce(sum(coalesce(${aiUsageEvents.actualCostUsd}, ${aiUsageEvents.estimatedCostUsd})), 0)`,
+      })
+      .from(aiUsageEvents)
+      .where(
+        and(
+          eq(aiUsageEvents.projectId, params.projectId),
+          gte(aiUsageEvents.createdAt, startOfMonth()),
+        ),
+      );
+    const byTask = await db
+      .select({
+        taskType: aiUsageEvents.taskType,
+        totalCostUsd: sql<string>`coalesce(sum(coalesce(${aiUsageEvents.actualCostUsd}, ${aiUsageEvents.estimatedCostUsd})), 0)`,
+      })
+      .from(aiUsageEvents)
+      .where(eq(aiUsageEvents.projectId, params.projectId))
+      .groupBy(aiUsageEvents.taskType);
+    const byModel = await db
+      .select({
+        model: aiUsageEvents.model,
+        totalCostUsd: sql<string>`coalesce(sum(coalesce(${aiUsageEvents.actualCostUsd}, ${aiUsageEvents.estimatedCostUsd})), 0)`,
+      })
+      .from(aiUsageEvents)
+      .where(eq(aiUsageEvents.projectId, params.projectId))
+      .groupBy(aiUsageEvents.model);
+
+    return {
+      dailyCostUsd: Number(daily?.total ?? 0).toFixed(6),
+      monthlyCostUsd: Number(monthly?.total ?? 0).toFixed(6),
+      byTask,
+      byModel,
+    };
+  });
 }

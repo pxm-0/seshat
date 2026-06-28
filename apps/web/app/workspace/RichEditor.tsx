@@ -2,27 +2,41 @@
 
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 
 import type { DocumentRecord } from "./web-api";
 
 type SaveStatus = "saved" | "saving" | "unsaved" | "error";
+
+export type EditorSelection = {
+  text: string;
+  from: number;
+  to: number;
+};
+
+export type RichEditorHandle = {
+  applySuggestion: (
+    text: string,
+    mode: "replace_selection" | "insert_at_cursor" | "append",
+  ) => Promise<DocumentRecord>;
+};
 
 const emptyEditorJson = {
   type: "doc",
   content: [{ type: "paragraph" }],
 };
 
-export function RichEditor({
-  document,
-  onSave,
-}: {
-  document: DocumentRecord;
-  onSave: (payload: {
-    editorJson: Record<string, unknown>;
-    plainText: string;
-  }) => Promise<DocumentRecord>;
-}) {
+export const RichEditor = forwardRef<
+  RichEditorHandle,
+  {
+    document: DocumentRecord;
+    onSelectionChange: (selection: EditorSelection | null) => void;
+    onSave: (payload: {
+      editorJson: Record<string, unknown>;
+      plainText: string;
+    }) => Promise<DocumentRecord>;
+  }
+>(function RichEditor({ document, onSave, onSelectionChange }, ref) {
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved");
   const [lastSavedAt, setLastSavedAt] = useState<string>("");
   const pendingSave = useRef<{
@@ -52,7 +66,48 @@ export function RichEditor({
       };
       setSaveStatus("unsaved");
     },
+    onSelectionUpdate({ editor: updatedEditor }) {
+      const { from, to } = updatedEditor.state.selection;
+      const text = updatedEditor.state.doc.textBetween(from, to, "\n").trim();
+      onSelectionChange(text ? { text, from, to } : null);
+    },
   });
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      async applySuggestion(text, mode) {
+        if (!editor) {
+          throw new Error("Editor is not ready.");
+        }
+
+        const { from, to } = editor.state.selection;
+        if (mode === "replace_selection") {
+          editor.chain().focus().insertContentAt({ from, to }, text).run();
+        } else if (mode === "insert_at_cursor") {
+          editor.chain().focus().insertContentAt(to, text).run();
+        } else {
+          editor
+            .chain()
+            .focus()
+            .insertContentAt(editor.state.doc.content.size, `\n\n${text}`)
+            .run();
+        }
+
+        const payload = {
+          editorJson: editor.getJSON() as Record<string, unknown>,
+          plainText: editor.getText(),
+        };
+        pendingSave.current = null;
+        setSaveStatus("saving");
+        const saved = await onSave(payload);
+        setSaveStatus("saved");
+        setLastSavedAt(new Date().toLocaleTimeString());
+        return saved;
+      },
+    }),
+    [editor, onSave],
+  );
 
   useEffect(() => {
     if (!editor) {
@@ -63,10 +118,11 @@ export function RichEditor({
       activeDocumentId.current = document.id;
       pendingSave.current = null;
       editor.commands.setContent(document.editorJson ?? emptyEditorJson, { emitUpdate: false });
+      onSelectionChange(null);
       setSaveStatus("saved");
       setLastSavedAt("");
     }
-  }, [document, editor]);
+  }, [document, editor, onSelectionChange]);
 
   useEffect(() => {
     if (saveStatus !== "unsaved") {
@@ -121,4 +177,4 @@ export function RichEditor({
       </div>
     </>
   );
-}
+});

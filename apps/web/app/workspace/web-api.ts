@@ -59,3 +59,57 @@ export type Snapshot = {
   wordCount: number;
   createdAt: string;
 };
+
+export type AiTaskType =
+  | "rewrite_selected_text"
+  | "continue_document"
+  | "summarize_document"
+  | "critique_text";
+
+export type AiRun = {
+  id: string;
+  projectId: string;
+  documentId: string | null;
+  taskType: AiTaskType;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "blocked";
+  suggestionStatus: "pending" | "accepted" | "rejected";
+  provider: string;
+  model: string;
+  suggestionText: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  acceptedAt: string | null;
+  rejectedAt: string | null;
+};
+
+export type AiUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: string;
+  actualCostUsd: string | null;
+} | null;
+
+export type AiRunResponse =
+  | {
+      aiRun: AiRun;
+      usage: AiUsage;
+    }
+  | {
+      aiRunId: string;
+      status: "queued";
+    }
+  | {
+      confirmationRequired: true;
+      estimatedCostUsd: string;
+      message: string;
+    };
+
+export type UsageSummary = {
+  dailyCostUsd: string;
+  monthlyCostUsd: string;
+  byTask: Array<{ taskType: AiTaskType; totalCostUsd: string }>;
+  byModel: Array<{ model: string; totalCostUsd: string }>;
+};

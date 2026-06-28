@@ -1,14 +1,18 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { RichEditor } from "./RichEditor";
+import { RichEditor, type EditorSelection, type RichEditorHandle } from "./RichEditor";
 import {
   apiFetch,
+  type AiRun,
+  type AiRunResponse,
+  type AiTaskType,
   type DocumentNode,
   type DocumentRecord,
   type Project,
   type Snapshot,
+  type UsageSummary,
 } from "./web-api";
 
 type User = {
@@ -39,8 +43,17 @@ export default function WorkspacePage() {
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>("");
   const [selectedDocument, setSelectedDocument] = useState<DocumentRecord | null>(null);
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [projectTitle, setProjectTitle] = useState("");
   const [newDocumentTitle, setNewDocumentTitle] = useState("");
+  const [detailsTab, setDetailsTab] = useState<"details" | "snapshots" | "ai">("details");
+  const [selection, setSelection] = useState<EditorSelection | null>(null);
+  const [aiTaskType, setAiTaskType] = useState<AiTaskType>("rewrite_selected_text");
+  const [aiInstructions, setAiInstructions] = useState("");
+  const [aiRun, setAiRun] = useState<AiRun | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState("");
+  const editorRef = useRef<RichEditorHandle | null>(null);
 
   const selectedTreeDocument = useMemo(
     () => (selectedDocumentId ? findDocument(documents, selectedDocumentId) : null),
@@ -65,6 +78,16 @@ export default function WorkspacePage() {
     setDocuments(response.documents);
   }, []);
 
+  const loadUsage = useCallback(async (activeProjectId: string) => {
+    if (!activeProjectId) {
+      setUsage(null);
+      return;
+    }
+
+    const response = await apiFetch<UsageSummary>(`/api/projects/${activeProjectId}/usage`);
+    setUsage(response);
+  }, []);
+
   const loadSnapshots = useCallback(async (activeProjectId: string, documentId: string) => {
     const response = await apiFetch<{ snapshots: Snapshot[] }>(
       `/api/projects/${activeProjectId}/documents/${documentId}/snapshots`,
@@ -78,6 +101,8 @@ export default function WorkspacePage() {
         `/api/projects/${activeProjectId}/documents/${documentId}`,
       );
       setSelectedDocument(response.document);
+      setSelection(null);
+      setAiRun(null);
       if (response.document.type !== "folder") {
         await loadSnapshots(activeProjectId, documentId);
       } else {
@@ -109,10 +134,36 @@ export default function WorkspacePage() {
 
   useEffect(() => {
     void loadDocuments(projectId);
+    void loadUsage(projectId);
     setSelectedDocumentId("");
     setSelectedDocument(null);
     setSnapshots([]);
-  }, [loadDocuments, projectId]);
+    setSelection(null);
+    setAiRun(null);
+    setAiError("");
+  }, [loadDocuments, loadUsage, projectId]);
+
+  useEffect(() => {
+    if (!aiRun || (aiRun.status !== "queued" && aiRun.status !== "running")) {
+      return;
+    }
+
+    const interval = window.setInterval(async () => {
+      try {
+        const response = await apiFetch<{ aiRun: AiRun }>(`/api/ai/runs/${aiRun.id}`);
+        setAiRun(response.aiRun);
+        if (response.aiRun.status !== "queued" && response.aiRun.status !== "running") {
+          await loadUsage(projectId);
+          window.clearInterval(interval);
+        }
+      } catch (error) {
+        setAiError(error instanceof Error ? error.message : "Could not refresh AI run.");
+        window.clearInterval(interval);
+      }
+    }, 2000);
+
+    return () => window.clearInterval(interval);
+  }, [aiRun, loadUsage, projectId]);
 
   async function createProject(event: FormEvent) {
     event.preventDefault();
@@ -224,6 +275,116 @@ export default function WorkspacePage() {
     await loadSnapshots(projectId, selectedDocument.id);
   }
 
+  async function runAi(confirmed = false) {
+    if (!projectId || !selectedDocument || selectedDocument.type === "folder") {
+      return;
+    }
+    if (aiTaskType === "rewrite_selected_text" && !selection?.text) {
+      setAiError("Select text before asking for a rewrite.");
+      setDetailsTab("ai");
+      return;
+    }
+
+    setAiBusy(true);
+    setAiError("");
+    setDetailsTab("ai");
+    try {
+      const response = await apiFetch<AiRunResponse>("/api/ai/runs", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId,
+          documentId: selectedDocument.id,
+          taskType: aiTaskType,
+          selection,
+          instructions: aiInstructions,
+          confirmed,
+        }),
+      });
+
+      if ("confirmationRequired" in response) {
+        if (confirm(`${response.message}\nEstimated cost: $${response.estimatedCostUsd}`)) {
+          await runAi(true);
+        }
+        return;
+      }
+
+      if ("aiRunId" in response) {
+        setAiRun({
+          id: response.aiRunId,
+          projectId,
+          documentId: selectedDocument.id,
+          taskType: aiTaskType,
+          status: "queued",
+          suggestionStatus: "pending",
+          provider: "openrouter",
+          model: "queued",
+          suggestionText: null,
+          errorMessage: null,
+          createdAt: new Date().toISOString(),
+          startedAt: null,
+          completedAt: null,
+          acceptedAt: null,
+          rejectedAt: null,
+        });
+        return;
+      }
+
+      setAiRun(response.aiRun);
+      await loadUsage(projectId);
+    } catch (error) {
+      setAiError(error instanceof Error ? error.message : "AI request failed.");
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  async function acceptAiRun() {
+    if (!projectId || !selectedDocument || !aiRun?.suggestionText || !editorRef.current) {
+      return;
+    }
+
+    setAiBusy(true);
+    setAiError("");
+    try {
+      await apiFetch(`/api/ai/runs/${aiRun.id}/accept`, { method: "POST" });
+      const mode =
+        aiRun.taskType === "rewrite_selected_text"
+          ? "replace_selection"
+          : aiRun.taskType === "continue_document"
+            ? "insert_at_cursor"
+            : "append";
+      const saved = await editorRef.current.applySuggestion(aiRun.suggestionText, mode);
+      setSelectedDocument(saved);
+      setAiRun({ ...aiRun, suggestionStatus: "accepted", acceptedAt: new Date().toISOString() });
+      await loadDocuments(projectId);
+      await loadSnapshots(projectId, selectedDocument.id);
+      await loadUsage(projectId);
+    } catch (error) {
+      setAiError(error instanceof Error ? error.message : "Could not accept AI suggestion.");
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  async function rejectAiRun() {
+    if (!aiRun) {
+      return;
+    }
+
+    setAiBusy(true);
+    setAiError("");
+    try {
+      const response = await apiFetch<{ aiRun: AiRun }>(`/api/ai/runs/${aiRun.id}/reject`, {
+        method: "POST",
+      });
+      setAiRun(response.aiRun);
+    } catch (error) {
+      setAiError(error instanceof Error ? error.message : "Could not reject AI suggestion.");
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
   async function moveDocument(document: DocumentNode, direction: -1 | 1, siblings: DocumentNode[]) {
     if (!projectId) {
       return;
@@ -319,13 +480,18 @@ export default function WorkspacePage() {
             <h1 className="document-title">{selectedDocument?.title ?? "No document selected"}</h1>
             <span className="muted">
               {selectedDocument
-                ? `${selectedDocument.type} · ${selectedDocument.wordCount} words`
+                ? `${selectedDocument.type} - ${selectedDocument.wordCount} words`
                 : "Create or select a document to start writing."}
             </span>
           </div>
         </div>
         {selectedDocument && selectedDocument.type !== "folder" ? (
-          <RichEditor document={selectedDocument} onSave={saveDocument} />
+          <RichEditor
+            ref={editorRef}
+            document={selectedDocument}
+            onSave={saveDocument}
+            onSelectionChange={setSelection}
+          />
         ) : (
           <div className="editor-area">
             <div className="prose-editor">
@@ -340,42 +506,139 @@ export default function WorkspacePage() {
       </section>
 
       <aside className="details">
-        <h2 className="section-heading">Details</h2>
-        {selectedDocument ? (
-          <div className="stack">
-            <label className="stack">
-              Title
-              <input
-                value={selectedDocument.title}
-                onChange={(event) =>
-                  setSelectedDocument({ ...selectedDocument, title: event.target.value })
-                }
-                onBlur={() => patchSelectedDocument({ title: selectedDocument.title })}
-              />
-            </label>
-            <p className="muted">Updated {new Date(selectedDocument.updatedAt).toLocaleString()}</p>
-          </div>
-        ) : (
-          <p className="muted">No document selected.</p>
-        )}
+        <div className="tabbar">
+          <button
+            className={detailsTab === "details" ? "active" : ""}
+            onClick={() => setDetailsTab("details")}
+          >
+            Details
+          </button>
+          <button
+            className={detailsTab === "snapshots" ? "active" : ""}
+            onClick={() => setDetailsTab("snapshots")}
+          >
+            Snapshots
+          </button>
+          <button
+            className={detailsTab === "ai" ? "active" : ""}
+            onClick={() => setDetailsTab("ai")}
+          >
+            AI
+          </button>
+        </div>
 
-        <h2 className="section-heading">Snapshots</h2>
-        <button
-          className="primary"
-          disabled={!selectedDocument || selectedDocument.type === "folder"}
-          onClick={createSnapshot}
-        >
-          Create snapshot
-        </button>
-        {snapshots.map((snapshot) => (
-          <div className="snapshot-row" key={snapshot.id}>
-            <strong>{snapshot.title ?? snapshot.reason}</strong>
-            <span className="muted">
-              {snapshot.wordCount} words · {new Date(snapshot.createdAt).toLocaleString()}
-            </span>
-            <button onClick={() => restoreSnapshot(snapshot.id)}>Restore</button>
+        {detailsTab === "details" ? (
+          <>
+            <h2 className="section-heading">Details</h2>
+            {selectedDocument ? (
+              <div className="stack">
+                <label className="stack">
+                  Title
+                  <input
+                    value={selectedDocument.title}
+                    onChange={(event) =>
+                      setSelectedDocument({ ...selectedDocument, title: event.target.value })
+                    }
+                    onBlur={() => patchSelectedDocument({ title: selectedDocument.title })}
+                  />
+                </label>
+                <p className="muted">
+                  Updated {new Date(selectedDocument.updatedAt).toLocaleString()}
+                </p>
+                {usage ? (
+                  <p className="muted">
+                    AI today ${usage.dailyCostUsd} - month ${usage.monthlyCostUsd}
+                  </p>
+                ) : null}
+              </div>
+            ) : (
+              <p className="muted">No document selected.</p>
+            )}
+          </>
+        ) : null}
+
+        {detailsTab === "snapshots" ? (
+          <>
+            <h2 className="section-heading">Snapshots</h2>
+            <button
+              className="primary"
+              disabled={!selectedDocument || selectedDocument.type === "folder"}
+              onClick={createSnapshot}
+            >
+              Create snapshot
+            </button>
+            {snapshots.map((snapshot) => (
+              <div className="snapshot-row" key={snapshot.id}>
+                <strong>{snapshot.title ?? snapshot.reason}</strong>
+                <span className="muted">
+                  {snapshot.wordCount} words - {new Date(snapshot.createdAt).toLocaleString()}
+                </span>
+                <button onClick={() => restoreSnapshot(snapshot.id)}>Restore</button>
+              </div>
+            ))}
+          </>
+        ) : null}
+
+        {detailsTab === "ai" ? (
+          <div className="stack">
+            <h2 className="section-heading">AI</h2>
+            <select
+              value={aiTaskType}
+              onChange={(event) => setAiTaskType(event.target.value as AiTaskType)}
+            >
+              <option value="rewrite_selected_text">Rewrite selection</option>
+              <option value="continue_document">Continue document</option>
+              <option value="summarize_document">Summarize</option>
+              <option value="critique_text">Critique</option>
+            </select>
+            <textarea
+              placeholder="Optional instruction"
+              rows={4}
+              value={aiInstructions}
+              onChange={(event) => setAiInstructions(event.target.value)}
+            />
+            <p className="muted">
+              {selection
+                ? `${selection.text.split(/\s+/).length} selected words`
+                : "No text selected"}
+            </p>
+            <button
+              className="primary"
+              disabled={aiBusy || !selectedDocument || selectedDocument.type === "folder"}
+              onClick={() => runAi()}
+            >
+              {aiBusy ? "Working..." : "Run AI"}
+            </button>
+            {aiError ? <p className="error">{aiError}</p> : null}
+            {aiRun ? (
+              <div className="suggestion-card">
+                <strong>{aiRun.status}</strong>
+                <p className="muted">
+                  {aiRun.model} - {aiRun.taskType}
+                </p>
+                {aiRun.errorMessage ? <p className="error">{aiRun.errorMessage}</p> : null}
+                {aiRun.suggestionText ? <pre>{aiRun.suggestionText}</pre> : null}
+                {aiRun.status === "succeeded" && aiRun.suggestionStatus === "pending" ? (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button disabled={aiBusy} onClick={acceptAiRun}>
+                      Accept
+                    </button>
+                    <button disabled={aiBusy} onClick={rejectAiRun}>
+                      Reject
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {usage ? (
+              <div className="stack">
+                <strong>Usage</strong>
+                <span className="muted">Today ${usage.dailyCostUsd}</span>
+                <span className="muted">Month ${usage.monthlyCostUsd}</span>
+              </div>
+            ) : null}
           </div>
-        ))}
+        ) : null}
       </aside>
     </main>
   );

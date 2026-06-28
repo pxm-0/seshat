@@ -15,7 +15,8 @@
     "@seshat/ai": "workspace:*",
     "@seshat/db": "workspace:*",
     "@seshat/shared": "workspace:*",
-    "bullmq": "5.79.1"
+    "bullmq": "5.79.1",
+    "drizzle-orm": "0.45.2"
   },
   "devDependencies": {
     "tsx": "4.22.4",
