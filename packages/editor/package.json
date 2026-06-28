@@ -17,5 +17,9 @@
   },
   "devDependencies": {
     "typescript": "6.0.3"
+  },
+  "dependencies": {
+    "@tiptap/core": "3.27.1",
+    "@tiptap/pm": "3.27.1"
   }
 }
